@@ -29,9 +29,11 @@ export default function DocumentPreview() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { documents } = useDocuments();
   const docRef = useRef<HTMLDivElement>(null);
+  const containerWrapperRef = useRef<HTMLDivElement>(null);
   const [footerCfg, setFooterCfg] = useState(DEFAULT_FOOTER);
   const [pageBreaks, setPageBreaks] = useState<number[]>([]);
   const [showBreaks, setShowBreaks] = useState(true);
+  const [scale, setScale] = useState(1);
 
   useEffect(() => {
     supabase
@@ -62,43 +64,52 @@ export default function DocumentPreview() {
   const fileDate = doc ? format(new Date(doc.issueDate || doc.createdAt), 'yyyy-MM-dd') : '';
   const fileNameBase = doc ? `${safeFileName(doc.clientInfo.name)}-${docLabel}-${docNumber}-${fileDate}` : '';
 
-  // Reserve bottom space (mm) on every PDF page for the footer
   const FOOTER_HEIGHT_MM = 16;
-  // Breathing room at the top of every PDF page (matches reference proportions)
   const PAGE_TOP_MM = 20;
-  // Extra gap kept above the footer divider so content never hugs the footer
   const FOOTER_GAP_MM = 12;
-  // Even, generous side margins on every PDF page (applied identically left & right)
   const PAGE_SIDE_MM = 22;
-  // Top padding applied to pages 2+ so continuation content doesn't hug the top edge
   const PAGE_CONTINUATION_TOP_MM = 14;
 
-  // A4 dimensions in mm
   const A4_WIDTH_MM = 210;
   const A4_HEIGHT_MM = 297;
 
-  // Compute on-screen page-break positions (in CSS px relative to docRef top)
-  // using the same slicing logic as the PDF exporter.
+  useEffect(() => {
+    const updateScale = () => {
+      if (!containerWrapperRef.current) return;
+      // Adjusted margin offset to leave comfortable 0.5rem (approx 8-16px) padding
+      const parentWidth = containerWrapperRef.current.clientWidth - 16;
+      const targetWidth = 794;
+      if (parentWidth < targetWidth) {
+        setScale(parentWidth / targetWidth);
+      } else {
+        setScale(1);
+      }
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    return () => window.removeEventListener('resize', updateScale);
+  }, []);
+
   useEffect(() => {
     if (!doc) return;
     const compute = () => {
       const el = docRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      if (rect.width === 0) return;
-      const pxPerMm = rect.width / A4_WIDTH_MM;
-      const contentH = rect.height;
+      const pxPerMm = 794 / A4_WIDTH_MM;
+      const contentH = el.scrollHeight;
       const usableFirst = (A4_HEIGHT_MM - PAGE_TOP_MM - FOOTER_HEIGHT_MM - FOOTER_GAP_MM) * pxPerMm;
       const usableCont = usableFirst - PAGE_CONTINUATION_TOP_MM * pxPerMm;
 
-      // nobreak block ranges relative to docRef top
       const ranges = Array.from(
         el.querySelectorAll<HTMLElement>('[data-pdf-nobreak]')
       )
         .map((n) => {
           const r = n.getBoundingClientRect();
+          const unscaledTop = (r.top - rect.top) / scale;
+          const unscaledBottom = (r.bottom - rect.top) / scale;
           if (r.height === 0) return null;
-          return { top: r.top - rect.top, bottom: r.bottom - rect.top };
+          return { top: unscaledTop, bottom: unscaledBottom };
         })
         .filter((r): r is { top: number; bottom: number } => r !== null);
 
@@ -125,17 +136,16 @@ export default function DocumentPreview() {
       }
       setPageBreaks(breaks);
     };
-    compute();
+    const t = setTimeout(compute, 100);
     const ro = new ResizeObserver(compute);
     if (docRef.current) ro.observe(docRef.current);
     window.addEventListener('resize', compute);
-    const t = setTimeout(compute, 300);
     return () => {
       ro.disconnect();
       window.removeEventListener('resize', compute);
       clearTimeout(t);
     };
-  }, [doc]);
+  }, [doc, scale]);
 
   const drawFooter = (pdf: jsPDF) => {
     if (!doc) return;
@@ -156,16 +166,13 @@ export default function DocumentPreview() {
     const line1 = fillTokens(footerCfg.footer_line_1);
     const line2 = fillTokens(footerCfg.footer_line_2);
     const ref = fillTokens(footerCfg.footer_reference);
-    // Align footer with the body's side margins so left/right padding matches
     const footerLeft = PAGE_SIDE_MM;
     const footerRight = pageW - PAGE_SIDE_MM;
     for (let i = 1; i <= total; i++) {
       pdf.setPage(i);
-      // Divider
       pdf.setDrawColor(180, 180, 180);
       pdf.setLineWidth(0.2);
       pdf.line(footerLeft, pageH - FOOTER_HEIGHT_MM + 2, footerRight, pageH - FOOTER_HEIGHT_MM + 2);
-      // Footer text
       pdf.setFont('helvetica', 'bold');
       pdf.setFontSize(8);
       pdf.setTextColor(60, 60, 60);
@@ -174,12 +181,10 @@ export default function DocumentPreview() {
       pdf.setFontSize(7);
       pdf.setTextColor(110, 110, 110);
       if (line2) pdf.text(line2, footerLeft, pageH - FOOTER_HEIGHT_MM + 10);
-      // Doc reference (right side, top line)
       pdf.setFont('helvetica', 'bold');
       pdf.setFontSize(8);
       pdf.setTextColor(60, 60, 60);
       if (ref) pdf.text(ref, footerRight, pageH - FOOTER_HEIGHT_MM + 6, { align: 'right' });
-      // Page numbers (right side, bottom line)
       pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(7);
       pdf.setTextColor(110, 110, 110);
@@ -191,16 +196,12 @@ export default function DocumentPreview() {
   const exportPDF = async () => {
     if (!docRef.current || !doc) return;
     toast.loading('Generating PDF...');
-    // Force a fixed width for consistent PDF output regardless of screen size
     const originalStyle = docRef.current.style.cssText;
-    docRef.current.style.width = '794px'; // A4 width at 96dpi
+    docRef.current.style.width = '794px';
     docRef.current.style.maxWidth = '794px';
     docRef.current.style.padding = '0';
+    docRef.current.style.transform = 'none';
 
-    // Zero horizontal padding on the inner content wrapper so content
-    // (cards, items table) spans the full canvas width — letting the
-    // PDF page margins (PAGE_SIDE_MM) be the only side gutter. This makes
-    // the items table align edge-to-edge with the footer.
     const innerContent = docRef.current.querySelector<HTMLElement>('[data-pdf-content]');
     const innerOriginalStyle = innerContent?.style.cssText ?? '';
     if (innerContent) {
@@ -210,15 +211,14 @@ export default function DocumentPreview() {
 
     const canvas = await html2canvas(docRef.current, { scale: 2, useCORS: true, backgroundColor: '#ffffff', width: 794 });
 
-    // Capture nobreak block positions (in canvas px relative to docRef) BEFORE restoring styles
     const containerRect = docRef.current.getBoundingClientRect();
-    const cssToCanvas = canvas.width / containerRect.width;
+    const cssToCanvas = canvas.width / 794;
     const nobreakRanges = Array.from(
       docRef.current.querySelectorAll<HTMLElement>('[data-pdf-nobreak]')
     )
       .map((el) => {
         const r = el.getBoundingClientRect();
-        if (r.height === 0) return null; // hidden at this width
+        if (r.height === 0) return null;
         return {
           top: (r.top - containerRect.top) * cssToCanvas,
           bottom: (r.bottom - containerRect.top) * cssToCanvas,
@@ -226,7 +226,6 @@ export default function DocumentPreview() {
       })
       .filter((r): r is { top: number; bottom: number } => r !== null);
 
-    // Restore original styles
     docRef.current.style.cssText = originalStyle;
     if (innerContent) innerContent.style.cssText = innerOriginalStyle;
 
@@ -234,7 +233,6 @@ export default function DocumentPreview() {
     const pageW = pdf.internal.pageSize.getWidth();
     const w = pageW - PAGE_SIDE_MM * 2;
     const fullPageH = pdf.internal.pageSize.getHeight();
-    // Usable vertical space between top padding and footer
     const pageH = fullPageH - FOOTER_HEIGHT_MM - FOOTER_GAP_MM - PAGE_TOP_MM;
     const imgH = (canvas.height * w) / canvas.width;
 
@@ -242,8 +240,6 @@ export default function DocumentPreview() {
       const imgData = canvas.toDataURL('image/png');
       pdf.addImage(imgData, 'PNG', PAGE_SIDE_MM, PAGE_TOP_MM, w, imgH);
     } else {
-      // Multi-page: slice vertically into A4-height chunks, avoiding cuts
-      // through any [data-pdf-nobreak] block (table rows, totals, headings, etc.)
       const pxPerMm = canvas.width / w;
       const firstPageHeightPx = Math.floor(pageH * pxPerMm);
       const continuationPageHeightPx = Math.floor((pageH - PAGE_CONTINUATION_TOP_MM) * pxPerMm);
@@ -254,8 +250,6 @@ export default function DocumentPreview() {
         let sliceEnd = Math.min(renderedPx + thisPageHeightPx, canvas.height);
 
         if (sliceEnd < canvas.height) {
-          // Find earliest nobreak block whose top is inside this page
-          // but whose bottom would be cut. Break the page just above it.
           let earliestBreak: number | null = null;
           for (const range of nobreakRanges) {
             if (
@@ -274,7 +268,6 @@ export default function DocumentPreview() {
         }
 
         let sliceHeight = sliceEnd - renderedPx;
-        // Fallback: if a single block is taller than a full page, do a hard slice
         if (sliceHeight <= 0) {
           sliceHeight = Math.min(thisPageHeightPx, canvas.height - renderedPx);
         }
@@ -314,12 +307,12 @@ export default function DocumentPreview() {
     docRef.current.style.width = '794px';
     docRef.current.style.maxWidth = '794px';
     docRef.current.style.padding = '0';
+    docRef.current.style.transform = 'none';
 
     const canvas = await html2canvas(docRef.current, { scale: 2, useCORS: true, backgroundColor: '#ffffff', width: 794 });
 
-    // Capture nobreak block positions before restoring styles
     const containerRect = docRef.current.getBoundingClientRect();
-    const cssToCanvas = canvas.width / containerRect.width;
+    const cssToCanvas = canvas.width / 794;
     const nobreakRanges = Array.from(
       docRef.current.querySelectorAll<HTMLElement>('[data-pdf-nobreak]')
     )
@@ -335,7 +328,6 @@ export default function DocumentPreview() {
 
     docRef.current.style.cssText = originalStyle;
 
-    // Compute A4 page slicing identical to PDF export
     const w = A4_WIDTH_MM - PAGE_SIDE_MM * 2;
     const pageH = A4_HEIGHT_MM - FOOTER_HEIGHT_MM - FOOTER_GAP_MM - PAGE_TOP_MM;
     const pxPerMm = canvas.width / w;
@@ -410,7 +402,6 @@ export default function DocumentPreview() {
     toast.success('Image(s) downloaded');
   };
 
-  // Auto-trigger re-download when arriving with ?download=pdf|jpeg
   useEffect(() => {
     if (!doc) return;
     const want = searchParams.get('download');
@@ -421,7 +412,6 @@ export default function DocumentPreview() {
       setSearchParams({}, { replace: true });
     }, 400);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.id]);
 
   if (!doc) return <div className="p-8 text-center">Document not found</div>;
@@ -458,147 +448,160 @@ export default function DocumentPreview() {
         </div>
       </header>
 
-      <main className="mx-auto px-1 xs:px-2 sm:px-4 lg:px-8 py-3 sm:py-6 lg:py-10 flex justify-center max-w-screen-xl">
-        <div ref={docRef} className="relative bg-card w-full max-w-[210mm] shadow-lg sm:shadow-xl lg:shadow-2xl rounded-md sm:rounded-lg" style={{ fontFamily: "'DM Sans', sans-serif" }}>
-          {showBreaks && pageBreaks.map((y, i) => (
-            <div
-              key={i}
-              className="pointer-events-none absolute left-0 right-0 z-20"
-              style={{ top: `${y}px` }}
-            >
-              <div className="border-t-2 border-dashed border-accent/70" />
-              <div className="absolute -top-3 right-2 bg-accent text-accent-foreground text-[10px] font-semibold px-2 py-0.5 rounded shadow">
-                Page {i + 2} ↓
-              </div>
-            </div>
-          ))}
-          {/* Document Content - fully responsive padding */}
-          <div data-pdf-content className="p-6 xs:p-7 sm:p-10 md:p-12 lg:p-14">
-            {/* Header — Title left, logo right (if present) */}
-            <div data-pdf-nobreak className="flex justify-between items-start gap-6 mb-5 sm:mb-7">
-              <div className="flex-1 min-w-0">
-                <h2 className="text-2xl xs:text-3xl sm:text-4xl md:text-[2.5rem] font-normal tracking-tight font-heading text-accent leading-tight break-words">
-                  {doc.title}
-                </h2>
-                <div className="mt-4 sm:mt-5 grid grid-cols-[auto_1fr] gap-x-4 sm:gap-x-6 gap-y-1.5 text-xs sm:text-sm">
-                  <span className="text-muted-foreground">{docLabel} No</span>
-                  <span className="font-semibold text-foreground">{docNumber}</span>
-                  <span className="text-muted-foreground">{docLabel} Date</span>
-                  <span className="font-semibold text-foreground">{format(new Date(doc.issueDate || doc.createdAt), 'MMM d, yyyy')}</span>
-                  {doc.type === 'invoice' && doc.dueDate && (
-                    <>
-                      <span className="text-muted-foreground">Due Date</span>
-                      <span className="font-semibold text-foreground">{format(new Date(doc.dueDate), 'MMM d, yyyy')}</span>
-                    </>
-                  )}
-                  {doc.type === 'quote' && doc.dueDate && (
-                    <>
-                      <span className="text-muted-foreground">Valid Till Date</span>
-                      <span className="font-semibold text-foreground">{format(new Date(doc.dueDate), 'MMM d, yyyy')}</span>
-                    </>
-                  )}
+      {/* Main Container with 0.5rem (p-2 / px-2) padding for comfortable framing */}
+      <main ref={containerWrapperRef} className="mx-auto px-2 sm:px-6 lg:px-8 py-3 sm:py-6 lg:py-10 flex justify-center max-w-screen-xl overflow-x-hidden">
+        <div 
+          style={{ 
+            width: '794px', 
+            maxWidth: '794px',
+            transform: `scale(${scale})`,
+            transformOrigin: 'top center',
+            marginBottom: scale < 1 ? `-${Math.round(docRef.current ? docRef.current.scrollHeight * (1 - scale) : 0)}px` : '0px',
+            fontFamily: "'DM Sans', sans-serif" 
+          }}
+          className="relative bg-card shadow-lg sm:shadow-xl lg:shadow-2xl rounded-md sm:rounded-lg transition-transform"
+        >
+          <div ref={docRef}>
+            {showBreaks && pageBreaks.map((y, i) => (
+              <div
+                key={i}
+                className="pointer-events-none absolute left-0 right-0 z-20"
+                style={{ top: `${y}px` }}
+              >
+                <div className="border-t-2 border-dashed border-accent/70" />
+                <div className="absolute -top-3 right-2 bg-accent text-accent-foreground text-[10px] font-semibold px-2 py-0.5 rounded shadow">
+                  Page {i + 2} ↓
                 </div>
               </div>
-              {doc.businessInfo.logo && (
-                <div className="flex-shrink-0">
-                  <img src={doc.businessInfo.logo} alt="Logo" className="h-12 sm:h-16 w-auto object-contain" />
+            ))}
+            {/* Document Content with comfortable padding */}
+            <div data-pdf-content className="p-4 xs:p-6 sm:p-10 md:p-12 lg:p-14">
+              {/* Header — Title left, logo right (if present) */}
+              <div data-pdf-nobreak className="flex justify-between items-start gap-6 mb-5 sm:mb-7">
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-2xl xs:text-3xl sm:text-4xl md:text-[2.5rem] font-normal tracking-tight font-heading text-accent leading-tight break-words">
+                    {doc.title}
+                  </h2>
+                  <div className="mt-4 sm:mt-5 grid grid-cols-[auto_1fr] gap-x-4 sm:gap-x-6 gap-y-1.5 text-xs sm:text-sm">
+                    <span className="text-muted-foreground">{docLabel} No</span>
+                    <span className="font-semibold text-foreground">{docNumber}</span>
+                    <span className="text-muted-foreground">{docLabel} Date</span>
+                    <span className="font-semibold text-foreground">{format(new Date(doc.issueDate || doc.createdAt), 'MMM d, yyyy')}</span>
+                    {doc.type === 'invoice' && doc.dueDate && (
+                      <>
+                        <span className="text-muted-foreground">Due Date</span>
+                        <span className="font-semibold text-foreground">{format(new Date(doc.dueDate), 'MMM d, yyyy')}</span>
+                      </>
+                    )}
+                    {doc.type === 'quote' && doc.dueDate && (
+                      <>
+                        <span className="text-muted-foreground">Valid Till Date</span>
+                        <span className="font-semibold text-foreground">{format(new Date(doc.dueDate), 'MMM d, yyyy')}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {doc.businessInfo.logo && (
+                  <div className="flex-shrink-0">
+                    <img src={doc.businessInfo.logo} alt="Logo" className="h-12 sm:h-16 w-auto object-contain" />
+                  </div>
+                )}
+              </div>
+
+              {/* From / For cards — Forced 2 Columns */}
+              <div data-pdf-nobreak className="grid grid-cols-2 gap-3 sm:gap-5 mb-6 sm:mb-8">
+                <div className="rounded-lg p-3 sm:p-5 bg-gold-light">
+                  <p className="text-sm sm:text-lg font-heading text-accent mb-1.5 sm:mb-2">{docLabel} From</p>
+                  <p className="font-bold text-xs sm:text-[15px]">{doc.businessInfo.name}</p>
+                  <div className="text-[11px] sm:text-sm mt-1 space-y-0.5 text-muted-foreground">
+                    {doc.businessInfo.address && <p>{doc.businessInfo.address}</p>}
+                    {doc.businessInfo.phone && <p>{doc.businessInfo.phone}</p>}
+                    {doc.businessInfo.email && <p>{doc.businessInfo.email}</p>}
+                  </div>
+                </div>
+                <div className="rounded-lg p-3 sm:p-5 bg-gold-light">
+                  <p className="text-sm sm:text-lg font-heading text-accent mb-1.5 sm:mb-2">{docLabel} For</p>
+                  <p className="font-bold text-xs sm:text-[15px]">{doc.clientInfo.name}</p>
+                  <div className="text-[11px] sm:text-sm mt-1 space-y-0.5 text-muted-foreground">
+                    {doc.clientInfo.address && <p>{doc.clientInfo.address}</p>}
+                    {doc.clientInfo.phone && <p>{doc.clientInfo.phone}</p>}
+                    {doc.clientInfo.email && <p>{doc.clientInfo.email}</p>}
+                  </div>
+                </div>
+              </div>
+
+              {/* Items table */}
+              <div className="mb-6 sm:mb-8 rounded-lg overflow-hidden border border-border">
+                <table className="w-full" style={{ borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr data-pdf-nobreak className="bg-accent text-accent-foreground">
+                      <th className="text-left px-3 py-3 text-xs sm:text-sm font-semibold w-8">#</th>
+                      <th className="text-left px-3 py-3 text-xs sm:text-sm font-semibold">Item</th>
+                      <th className="text-center px-2 py-3 text-xs sm:text-sm font-semibold w-16">Qty</th>
+                      <th className="text-right px-3 py-3 text-xs sm:text-sm font-semibold w-24">Rate</th>
+                      <th className="text-right px-3 py-3 text-xs sm:text-sm font-semibold w-28">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {doc.items.map((item, idx) => (
+                      <tr
+                        key={item.id}
+                        data-pdf-nobreak
+                        className={idx % 2 === 0 ? 'bg-card' : 'bg-gold-light/40'}
+                      >
+                        <td className="px-3 py-3 text-xs sm:text-sm text-muted-foreground align-top">{idx + 1}.</td>
+                        <td className="px-3 py-3 text-xs sm:text-sm align-top">{item.description}</td>
+                        <td className="px-2 py-3 text-xs sm:text-sm text-center align-top">{item.quantity}</td>
+                        <td className="px-3 py-3 text-xs sm:text-sm text-right align-top">{formatCurrency(item.unitPrice)}</td>
+                        <td className="px-3 py-3 text-xs sm:text-sm text-right font-medium align-top">{formatCurrency(item.quantity * item.unitPrice)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Totals */}
+              <div data-pdf-nobreak className="flex justify-end mb-6 sm:mb-8">
+                <div className="w-full sm:w-80 space-y-2">
+                  <div className="flex justify-between text-xs sm:text-sm">
+                    <span className="text-muted-foreground">Amount</span>
+                    <span>{formatCurrency(subtotal)}</span>
+                  </div>
+                  {doc.taxRate > 0 && (
+                    <div className="flex justify-between text-xs sm:text-sm">
+                      <span className="text-muted-foreground">Tax ({doc.taxRate}%)</span>
+                      <span>{formatCurrency(tax)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-baseline pt-3 mt-1 border-t border-border">
+                    <span className="font-heading text-base sm:text-lg">Total</span>
+                    <span className="font-bold text-base sm:text-lg">{formatCurrency(grandTotal)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Terms */}
+              {doc.termsAndConditions && (
+                <div data-pdf-nobreak className="mb-4">
+                  <h3 className="text-sm sm:text-base font-heading text-accent mb-2">Terms and Conditions</h3>
+                  <p className="text-xs sm:text-sm whitespace-pre-wrap leading-relaxed text-muted-foreground">{doc.termsAndConditions}</p>
+                </div>
+              )}
+
+              {/* Receipt Thank You */}
+              {doc.type === 'receipt' && (
+                <div data-pdf-nobreak className="text-center py-4 sm:py-6 rounded-lg bg-success/10">
+                  <p className="font-semibold text-base sm:text-lg text-success font-heading">
+                    Thank you for your business.
+                  </p>
                 </div>
               )}
             </div>
-
-            {/* From / For cards */}
-            <div data-pdf-nobreak className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-5 mb-6 sm:mb-8">
-              <div className="rounded-lg p-4 sm:p-5 bg-gold-light">
-                <p className="text-base sm:text-lg font-heading text-accent mb-2">{docLabel} From</p>
-                <p className="font-bold text-sm sm:text-[15px]">{doc.businessInfo.name}</p>
-                <div className="text-xs sm:text-sm mt-1 space-y-0.5 text-muted-foreground">
-                  {doc.businessInfo.address && <p>{doc.businessInfo.address}</p>}
-                  {doc.businessInfo.phone && <p>{doc.businessInfo.phone}</p>}
-                  {doc.businessInfo.email && <p>{doc.businessInfo.email}</p>}
-                </div>
-              </div>
-              <div className="rounded-lg p-4 sm:p-5 bg-gold-light">
-                <p className="text-base sm:text-lg font-heading text-accent mb-2">{docLabel} For</p>
-                <p className="font-bold text-sm sm:text-[15px]">{doc.clientInfo.name}</p>
-                <div className="text-xs sm:text-sm mt-1 space-y-0.5 text-muted-foreground">
-                  {doc.clientInfo.address && <p>{doc.clientInfo.address}</p>}
-                  {doc.clientInfo.phone && <p>{doc.clientInfo.phone}</p>}
-                  {doc.clientInfo.email && <p>{doc.clientInfo.email}</p>}
-                </div>
-              </div>
-            </div>
-
-            {/* Items table */}
-            <div className="mb-6 sm:mb-8 rounded-lg overflow-hidden border border-border">
-              <table className="w-full" style={{ borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr data-pdf-nobreak className="bg-accent text-accent-foreground">
-                    <th className="text-left px-3 py-3 text-xs sm:text-sm font-semibold w-8">#</th>
-                    <th className="text-left px-3 py-3 text-xs sm:text-sm font-semibold">Item</th>
-                    <th className="text-center px-2 py-3 text-xs sm:text-sm font-semibold w-16">Qty</th>
-                    <th className="text-right px-3 py-3 text-xs sm:text-sm font-semibold w-24">Rate</th>
-                    <th className="text-right px-3 py-3 text-xs sm:text-sm font-semibold w-28">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {doc.items.map((item, idx) => (
-                    <tr
-                      key={item.id}
-                      data-pdf-nobreak
-                      className={idx % 2 === 0 ? 'bg-card' : 'bg-gold-light/40'}
-                    >
-                      <td className="px-3 py-3 text-xs sm:text-sm text-muted-foreground align-top">{idx + 1}.</td>
-                      <td className="px-3 py-3 text-xs sm:text-sm align-top">{item.description}</td>
-                      <td className="px-2 py-3 text-xs sm:text-sm text-center align-top">{item.quantity}</td>
-                      <td className="px-3 py-3 text-xs sm:text-sm text-right align-top">{formatCurrency(item.unitPrice)}</td>
-                      <td className="px-3 py-3 text-xs sm:text-sm text-right font-medium align-top">{formatCurrency(item.quantity * item.unitPrice)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Totals */}
-            <div data-pdf-nobreak className="flex justify-end mb-6 sm:mb-8">
-              <div className="w-full sm:w-80 space-y-2">
-                <div className="flex justify-between text-xs sm:text-sm">
-                  <span className="text-muted-foreground">Amount</span>
-                  <span>{formatCurrency(subtotal)}</span>
-                </div>
-                {doc.taxRate > 0 && (
-                  <div className="flex justify-between text-xs sm:text-sm">
-                    <span className="text-muted-foreground">Tax ({doc.taxRate}%)</span>
-                    <span>{formatCurrency(tax)}</span>
-                  </div>
-                )}
-                <div className="flex justify-between items-baseline pt-3 mt-1 border-t border-border">
-                  <span className="font-heading text-base sm:text-lg">Total</span>
-                  <span className="font-bold text-base sm:text-lg">{formatCurrency(grandTotal)}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Terms */}
-            {doc.termsAndConditions && (
-              <div data-pdf-nobreak className="mb-4">
-                <h3 className="text-sm sm:text-base font-heading text-accent mb-2">Terms and Conditions</h3>
-                <p className="text-xs sm:text-sm whitespace-pre-wrap leading-relaxed text-muted-foreground">{doc.termsAndConditions}</p>
-              </div>
-            )}
-
-            {/* Receipt Thank You */}
-            {doc.type === 'receipt' && (
-              <div data-pdf-nobreak className="text-center py-4 sm:py-6 rounded-lg bg-success/10">
-                <p className="font-semibold text-base sm:text-lg text-success font-heading">
-                  Thank you for your business.
-                </p>
-              </div>
-            )}
           </div>
         </div>
       </main>
 
-      <section className="mx-auto px-1 xs:px-2 sm:px-4 lg:px-8 pb-10 max-w-[210mm] w-full">
+      <section className="mx-auto px-2 sm:px-4 lg:px-8 pb-10 max-w-[210mm] w-full">
         <CostBreakdownEditor doc={doc} />
       </section>
     </div>
