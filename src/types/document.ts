@@ -61,11 +61,15 @@ export interface QuoteDocument {
   items: LineItem[];
   taxRate: number;
   termsAndConditions: string;
-  /** Job cost breakdown (labour/services/margin/other) — money tracked in Money Tracker */
   costItems?: CostItem[];
   createdAt: string;
   issueDate?: string;
   dueDate?: string;
+
+  // Business OS / SOP integration
+  jobId?: string;
+  integrationStatus?: 'standalone' | 'linked' | 'synced' | 'sync_failed';
+  integrationSyncedAt?: string;
 }
 
 export function generateId(): string {

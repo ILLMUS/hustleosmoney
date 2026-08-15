@@ -1,16 +1,30 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { getSopJob } from '@/lib/sopApi';
 import { useDocuments } from '@/context/DocumentContext';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/integrations/supabase/client';
-import { QuoteDocument, LineItem, BusinessInfo, ClientInfo, CostItem, CostCategory, COST_CATEGORIES, generateId, nextQuoteNumber, calculateSubtotal, calculateTax, calculateCostTotal } from '@/types/document';
+import { 
+  QuoteDocument, 
+  LineItem, 
+  BusinessInfo, 
+  ClientInfo, 
+  CostItem, 
+  CostCategory, 
+  COST_CATEGORIES, 
+  generateId, 
+  nextQuoteNumber, 
+  calculateSubtotal, 
+  calculateTax, 
+  calculateCostTotal 
+} from '@/types/document';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Card } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ArrowLeft, Plus, Trash2, Upload, Save, Users } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Upload, Save, Users, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface SavedClient {
@@ -19,8 +33,10 @@ interface SavedClient {
   email: string;
   phone: string;
   address: string;
-  company: string;
+  company?: string;
 }
+
+type DocumentType = 'quote' | 'invoice' | 'receipt';
 
 const emptyBusiness: BusinessInfo = { logo: null, name: '', address: '', phone: '', email: '' };
 const emptyClient: ClientInfo = { name: '', address: '', phone: '', email: '' };
@@ -31,15 +47,20 @@ function formatCurrency(n: number) {
   return `E${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export default function QuoteForm() {
+export default function DocumentForm() {
   const navigate = useNavigate();
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+
+  const jobId = searchParams.get('job_id');
   const { documents, addDocument, updateDocument } = useDocuments();
   const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const existing = id ? documents.find(d => d.id === id) : undefined;
 
+  // Document Core State
+  const [docType, setDocType] = useState<DocumentType>(existing?.type as DocumentType || 'quote');
   const [business, setBusiness] = useState<BusinessInfo>(existing?.businessInfo ?? { ...emptyBusiness });
   const [client, setClient] = useState<ClientInfo>(existing?.clientInfo ?? { ...emptyClient });
   const [title, setTitle] = useState(existing?.title ?? '');
@@ -47,11 +68,15 @@ export default function QuoteForm() {
   const [taxRate, setTaxRate] = useState(existing?.taxRate ?? 0);
   const [costItems, setCostItems] = useState<CostItem[]>(existing?.costItems ?? []);
   const [terms, setTerms] = useState(existing?.termsAndConditions ?? '');
+  
+  // UI & Syncing State
   const [savedClients, setSavedClients] = useState<SavedClient[]>([]);
-  // Fetch profile and saved clients
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Fetch business profile and client list on mount
   useEffect(() => {
     if (!user) return;
-    // Auto-fill business info from profile (for new docs)
+
     if (!existing) {
       supabase
         .from('profiles')
@@ -70,7 +95,7 @@ export default function QuoteForm() {
           }
         });
     }
-    // Fetch saved clients
+
     supabase.from('clients').select('*').order('name').then(({ data }) => {
       if (data) setSavedClients(data);
     });
@@ -91,31 +116,32 @@ export default function QuoteForm() {
     reader.readAsDataURL(file);
   };
 
-  const updateItem = (id: string, field: keyof LineItem, value: string | number) => {
-    setItems(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+  const updateItem = (itemId: string, field: keyof LineItem, value: string | number) => {
+    setItems(prev => prev.map(item => item.id === itemId ? { ...item, [field]: value } : item));
   };
 
   const addItem = () => setItems(prev => [...prev, emptyItem()]);
-  const removeItem = (id: string) => setItems(prev => prev.filter(i => i.id !== id));
+  const removeItem = (itemId: string) => setItems(prev => prev.filter(i => i.id !== itemId));
 
-  const updateCostItem = (id: string, field: keyof CostItem, value: string | number) => {
-    setCostItems(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+  const updateCostItem = (costId: string, field: keyof CostItem, value: string | number) => {
+    setCostItems(prev => prev.map(c => c.id === costId ? { ...c, [field]: value } : c));
   };
   const addCostItem = () => setCostItems(prev => [...prev, emptyCostItem()]);
-  const removeCostItem = (id: string) => setCostItems(prev => prev.filter(c => c.id !== id));
-  const costTotal = calculateCostTotal(costItems);
+  const removeCostItem = (costId: string) => setCostItems(prev => prev.filter(c => c.id !== costId));
 
+  const costTotal = calculateCostTotal(costItems);
   const subtotal = calculateSubtotal(items);
   const tax = calculateTax(subtotal, taxRate);
   const grandTotal = subtotal + tax;
 
-  const handleSave = () => {
+  // Unified Stage & Registration Sync
+  const handleSave = async () => {
     if (!client.name.trim()) {
       toast.error('Client name is required');
       return;
     }
     if (!title.trim()) {
-      toast.error('Quote title is required');
+      toast.error('Document title is required');
       return;
     }
     if (items.length === 0 || items.every(i => !i.description.trim())) {
@@ -123,16 +149,42 @@ export default function QuoteForm() {
       return;
     }
 
-    // No longer using localStorage — profile is the source of truth
+    setIsSaving(true);
 
-    if (existing) {
-      updateDocument({ ...existing, businessInfo: business, clientInfo: client, title, items, taxRate, costItems, termsAndConditions: terms });
-      toast.success('Document updated');
-    } else {
-      const doc: QuoteDocument = {
-        id: generateId(),
-        type: 'quote',
-        quoteNumber: nextQuoteNumber(),
+    try {
+      // 1. Auto-register or update client in database
+      if (user) {
+        const { data: existingClient } = await supabase
+          .from('clients')
+          .select('id')
+          .eq('name', client.name.trim())
+          .maybeSingle();
+
+        if (!existingClient) {
+          const { data: newClient } = await supabase
+            .from('clients')
+            .insert([{ 
+              name: client.name, 
+              email: client.email, 
+              phone: client.phone, 
+              address: client.address,
+              user_id: user.id 
+            }])
+            .select()
+            .single();
+
+          if (newClient) {
+            setSavedClients(prev => [...prev, newClient]);
+          }
+        }
+      }
+
+      // 2. Prepare payload
+      const docId = existing?.id || generateId();
+      const docPayload: QuoteDocument = {
+        id: docId,
+        type: docType,
+        quoteNumber: existing?.quoteNumber || nextQuoteNumber(),
         title,
         businessInfo: business,
         clientInfo: client,
@@ -140,23 +192,75 @@ export default function QuoteForm() {
         taxRate,
         costItems,
         termsAndConditions: terms,
-        createdAt: new Date().toISOString(),
+        createdAt: existing?.createdAt || new Date().toISOString(),
       };
-      addDocument(doc);
-      toast.success('Quote saved');
+// 3. Sync directly to Supabase
+      if (user) {
+        const { error: dbError } = await supabase
+          .from('documents')
+          .upsert({
+            id: docId,
+            user_id: user.id,
+            type: docType,
+            title,
+            client_info: client,
+            business_info: business,
+            items: items,
+            cost_items: costItems,
+            tax_rate: taxRate,
+            terms_and_conditions: terms,
+            updated_at: new Date().toISOString()
+          });
+
+        if (dbError) throw dbError;
+      }
+
+      // 4. Update Context State
+      if (existing) {
+        updateDocument(docPayload);
+        toast.success(`${docType.toUpperCase()} synchronized successfully`);
+      } else {
+        addDocument(docPayload);
+        toast.success(`New ${docType.toUpperCase()} registered and synchronized`);
+      }
+
+      navigate('/');
+    } catch (err: any) {
+      console.error('Registration sync error:', err);
+      toast.error(err.message || 'Failed to sync document stage');
+    } finally {
+      setIsSaving(false);
     }
-    navigate('/');
   };
 
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b bg-card sticky top-0 z-10">
-        <div className="container mx-auto flex items-center gap-4 py-4 px-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
-            <ArrowLeft className="h-5 w-5" />
-          </Button>
-          <div>
-            <h1 className="text-xl font-heading font-bold">{existing ? 'Edit Document' : 'Create New Quote'}</h1>
+        <div className="container mx-auto flex items-center justify-between py-4 px-4">
+          <div className="flex items-center gap-4">
+            <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
+              <ArrowLeft className="h-5 w-5" />
+            </Button>
+            <div>
+              <h1 className="text-xl font-heading font-bold">
+                {existing ? `Edit ${docType.toUpperCase()}` : `Register New ${docType.toUpperCase()}`}
+              </h1>
+            </div>
+          </div>
+
+          {/* Document Stage Selector */}
+          <div className="flex items-center gap-2">
+            <Label className="text-xs text-muted-foreground hidden sm:inline">Stage:</Label>
+            <Select value={docType} onValueChange={(val: DocumentType) => setDocType(val)}>
+              <SelectTrigger className="w-[120px] h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="quote">Quote</SelectItem>
+                <SelectItem value="invoice">Invoice</SelectItem>
+                <SelectItem value="receipt">Receipt</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
       </header>
@@ -213,10 +317,10 @@ export default function QuoteForm() {
           </div>
         </Card>
 
-        {/* Quote Title */}
+        {/* Title */}
         <Card className="p-6 space-y-4 animate-fade-in">
-          <h2 className="font-heading font-semibold text-lg">Quote Title</h2>
-          <Input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Security Installation Quote" className="text-lg" />
+          <h2 className="font-heading font-semibold text-lg">Document Title</h2>
+          <Input value={title} onChange={e => setTitle(e.target.value)} placeholder={`e.g. ${docType.toUpperCase()} for Security Installation`} className="text-lg" />
         </Card>
 
         {/* Items Table */}
@@ -256,15 +360,12 @@ export default function QuoteForm() {
           </div>
         </Card>
 
-        {/* Job Cost Breakdown */}
+        {/* Cost Breakdown */}
         <Card className="p-6 space-y-4 animate-fade-in">
           <div>
             <h2 className="font-heading font-semibold text-lg">Cost to do the job</h2>
             <p className="text-xs text-muted-foreground mt-1">
-              Internal only — not shown on the quote/invoice. Record only the money it costs to render the
-              service (Labour), bought-in or outsourced work (Services), the sales margin you keep (Margin),
-              and anything else that doesn't fit (Other, with your own term). Only this amount flows into the
-              Money Tracker; the rest of the document total stays as company revenue.
+              Internal tracking only. This data is preserved across stage transformations (Quote → Invoice → Receipt).
             </p>
           </div>
 
@@ -312,11 +413,6 @@ export default function QuoteForm() {
               <span className="font-heading font-bold">{formatCurrency(costTotal)}</span>
             </div>
           </div>
-          {costItems.length > 0 && (
-            <p className="text-xs text-muted-foreground">
-              Company revenue after job cost: <span className="font-medium text-foreground">{formatCurrency(grandTotal - costTotal)}</span>
-            </p>
-          )}
         </Card>
 
         {/* Terms */}
@@ -330,10 +426,15 @@ export default function QuoteForm() {
           />
         </Card>
 
+        {/* Action Button */}
         <div className="flex justify-end pb-8">
-          <Button size="lg" onClick={handleSave} className="gap-2">
-            <Save className="h-4 w-4" />
-            {existing ? 'Update Document' : 'Save Quote'}
+          <Button size="lg" onClick={handleSave} disabled={isSaving} className="gap-2">
+            {isSaving ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            {existing ? `Sync & Update ${docType.toUpperCase()}` : `Register & Sync ${docType.toUpperCase()}`}
           </Button>
         </div>
       </main>

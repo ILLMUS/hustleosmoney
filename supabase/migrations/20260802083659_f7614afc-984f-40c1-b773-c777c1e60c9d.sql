@@ -1,0 +1,2 @@
+ALTER TABLE public.documents ADD COLUMN IF NOT EXISTS cost_items jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.money_entries ADD COLUMN IF NOT EXISTS cost_items jsonb NOT NULL DEFAULT '[]'::jsonb;
