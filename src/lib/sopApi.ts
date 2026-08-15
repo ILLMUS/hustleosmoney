@@ -1,8 +1,22 @@
 const SOP_API_BASE_URL =
-  'https://qeuotsyweqbkkeygkdii.supabase.co/functions/v1/quote-builder-api';
+  import.meta.env.VITE_SOP_QUOTE_API_URL;
 
-const SOP_API_KEY = import.meta.env.VITE_SOP_QUOTE_API_KEY;
+const SOP_API_KEY =
+  import.meta.env.VITE_SOP_QUOTE_API_KEY;
 
+if (!SOP_API_BASE_URL) {
+  console.warn('VITE_SOP_QUOTE_API_URL is not configured');
+}
+
+if (!SOP_API_KEY) {
+  console.warn('VITE_SOP_QUOTE_API_KEY is not configured');
+}
+
+console.log('SOP API URL:', SOP_API_BASE_URL);
+console.log(
+  'SOP API KEY configured:',
+  Boolean(SOP_API_KEY),
+);
 export interface SopJob {
   id: string;
   job_number?: string;
