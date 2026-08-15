@@ -196,21 +196,80 @@ export default function DocumentForm() {
       };
 // 3. Sync directly to Supabase
       if (user) {
-        const { error: dbError } = await supabase
-          .from('documents')
-          .upsert({
-            id: docId,
-            user_id: user.id,
-            type: docType,
-            title,
-            client_info: client,
-            business_info: business,
-            items: items,
-            cost_items: costItems,
-            tax_rate: taxRate,
-            terms_and_conditions: terms,
-            updated_at: new Date().toISOString()
-          });
+    [
+  {
+    "column_name": "id",
+    "data_type": "uuid"
+  },
+  {
+    "column_name": "type",
+    "data_type": "text"
+  },
+  {
+    "column_name": "quote_number",
+    "data_type": "text"
+  },
+  {
+    "column_name": "invoice_number",
+    "data_type": "text"
+  },
+  {
+    "column_name": "receipt_number",
+    "data_type": "text"
+  },
+  {
+    "column_name": "title",
+    "data_type": "text"
+  },
+  {
+    "column_name": "business_info",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "client_info",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "items",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "tax_rate",
+    "data_type": "numeric"
+  },
+  {
+    "column_name": "terms_and_conditions",
+    "data_type": "text"
+  },
+  {
+    "column_name": "issue_date",
+    "data_type": "text"
+  },
+  {
+    "column_name": "due_date",
+    "data_type": "text"
+  },
+  {
+    "column_name": "created_at",
+    "data_type": "timestamp with time zone"
+  },
+  {
+    "column_name": "user_id",
+    "data_type": "uuid"
+  },
+  {
+    "column_name": "client_id",
+    "data_type": "uuid"
+  },
+  {
+    "column_name": "cost_items",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "data",
+    "data_type": "jsonb"
+  }
+]
 
         if (dbError) throw dbError;
       }
